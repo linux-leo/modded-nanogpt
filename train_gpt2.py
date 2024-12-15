@@ -20,7 +20,7 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention #Koszars
 # Muon optimizer
 
 @torch.compile
-def zeropower_via_newtonschulz5(G, steps):
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
     quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
@@ -33,17 +33,13 @@ def zeropower_via_newtonschulz5(G, steps):
     assert len(G.shape) == 2
     a, b, c = (3.4445, -4.7750,  2.0315)
     X = G.bfloat16()
+    X /= (X.norm() + eps) # ensure top singular value <= 1
     if G.size(0) > G.size(1):
         X = X.T
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm() + 1e-7)
-    # Perform the NS iterations
     for _ in range(steps):
         A = X @ X.T
         B = b * A + c * A @ A # adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
-    
     if G.size(0) > G.size(1):
         X = X.T
     return X
@@ -228,6 +224,7 @@ class Block(nn.Module):
 class ValueEmbedding(nn.Module):
     def __init__(self, config: "GPTConfig"):
         super().__init__()
+        self.__setattr__
         self.embed = nn.ModuleList([
             nn.Embedding(config.vocab_size, config.model_dim)
             for _ in range(6)
@@ -237,6 +234,7 @@ class ValueEmbedding(nn.Module):
         ve = [emb(inputs) for emb in self.embed]
         ve += reversed(ve)
         return ve
+
 
 # -----------------------------------------------------------------------------
 # The main GPT-2 model
@@ -417,6 +415,7 @@ class Hyperparameters:
     # evaluation and logging hyperparams
     val_loss_every : int = 125 # every how many steps to evaluate val loss? 0 for only at the end
     val_tokens : int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    save_every : int = 0 # every how many steps to save the checkpoint? 0 for only at the end
 args = Hyperparameters()
 
 # set up DDP (distributed data parallel). torchrun sets this env variable
@@ -424,9 +423,9 @@ ddp_rank = int(os.environ['RANK'])
 ddp_local_rank = int(os.environ['LOCAL_RANK'])
 ddp_world_size = int(os.environ['WORLD_SIZE'])
 assert torch.cuda.is_available()
-device = torch.device(f'cuda:{ddp_local_rank}')
+device = torch.device(f"cuda:{ddp_local_rank}")
 torch.cuda.set_device(device)
-print(f'using device: {device}')
+print(f"using device: {device}")
 dist.init_process_group(backend='nccl', device_id=device)
 dist.barrier()
 master_process = (ddp_rank == 0) # this process will do logging, checkpointing etc.
@@ -435,26 +434,25 @@ master_process = (ddp_rank == 0) # this process will do logging, checkpointing e
 logfile = None
 if master_process:
     run_id = uuid.uuid4()
-    Path('logs').mkdir(exist_ok=True)
-    # logdir = Path('logs') / f'{run_id}'
-    # logdir.mkdir()
-    logfile = Path('logs') / f'{run_id}.txt'
+    logdir = Path("logs") / f"{run_id}"
+    logdir.mkdir(exist_ok=True)
+    logfile = Path("logs") / f"{run_id}.txt"
     print(logfile.stem)
     # create the log file
-    with logfile.open('w') as f:
+    with logfile.open("w") as f:
         # begin the log by printing this file (the Python code)
         print(code, file=f)
-        print('=' * 100, file=f)
+        print("=" * 100, file=f)
 def print0(s, logonly=False):
     if master_process:
-        with logfile.open('a') as f:
+        with logfile.open("a") as f:
             if not logonly:
                 print(s)
             print(s, file=f)
 # log information about the hardware/software environment this is running on
 # and print the full `nvidia-smi` to file
-print0(f'Running python {sys.version}')
-print0(f'Running pytorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}\nnvidia-smi:')
+print0(f"Running python {sys.version}")
+print0(f"Running pytorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}\nnvidia-smi:")
 import subprocess
 result = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 print0(f'{result.stdout}', logonly=True)
@@ -532,9 +530,9 @@ for step in range(args.num_iterations + 1):
         t0 = time.perf_counter()
     timed_steps = float('nan') if step <= 11 else (step - 10) + 1 # <= 11 to avoid bug in val
 
-    # Linearly increase the sliding window size over training in chunks of 128 from 128 -> 1856. By @fernbear.bsky.social
+    # Linearly increase the sliding window size over training in chunks of 64 from 64 -> 1792. By @fernbear.bsky.social
     frac_done = step / args.num_iterations # training progress
-    sw_num_blocks = int(((1 - frac_done) * 128 + frac_done * 1856) // 128)
+    sw_num_blocks = int(((1 - frac_done) * 64 + frac_done * 1792 + 64) // 128)
     if sw_num_blocks != sw_num_blocks_prev:
         sliding_window_num_blocks.copy_(sw_num_blocks, non_blocking=True)
         sw_num_blocks_prev = sw_num_blocks
@@ -560,18 +558,16 @@ for step in range(args.num_iterations + 1):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
 
-    # uncomment if you want to save any checkpoints
-    #save_every = 1000
-    #if master_process and (last_step or (save_every > 0 and step % save_every == 0)):
-    #    # stop the clock
-    #    torch.cuda.synchronize()
-    #    training_time_ms += 1000 * (time.perf_counter() - t0)
-    #    # save the state of the training process
-    #    log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
-    #    torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
-    #    # start the clock again
-    #    torch.cuda.synchronize()
-    #    t0 = time.perf_counter()
+    if master_process and (last_step or (args.save_every > 0 and step % args.save_every == 0)):
+        # stop the clock
+        torch.cuda.synchronize()
+        training_time_ms += 1000 * (time.perf_counter() - t0)
+        # save the state of the training process
+        log = dict(step=step, code=code, model=raw_model.state_dict(), optimizers=[opt.state_dict() for opt in optimizers])
+        torch.save(log, 'logs/%s/state_step%06d.pt' % (run_id, step))
+        # start the clock again
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
 
     # bit confusing: we want to make sure to eval on 0th iteration
     # but also after the very last iteration. so we loop for step <= num_iterations

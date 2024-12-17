@@ -188,7 +188,15 @@ class CausalSelfAttention(nn.Module):
         v = self.lambdas[0] * v + self.lambdas[1] * vi.view_as(v) # @KoszarskyB & @Grad62304977
         q, k = norm(q), norm(k) # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
-        y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask, enable_gqa=True)
+        score_mod = lambda score, b, h, q_idx, kv_idx : score - (1.0 / T)
+        y = flex_attention(
+            query=q.transpose(1, 2),
+            key=k.transpose(1, 2),
+            value=v.transpose(1, 2),
+            score_mod=score_mod,
+            block_mask=block_mask,
+            enable_gqa=True
+        )
         y = y.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y

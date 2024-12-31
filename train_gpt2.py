@@ -192,7 +192,7 @@ class CausalSelfAttention(nn.Module):
             query=q.transpose(1, 2),
             key=k.transpose(1, 2),
             value=v.transpose(1, 2),
-            score_mod=lambda score, *args : (score**2) - (1.0 / T),
+            score_mod=lambda score, *args : (score*score) - (1.0 / T),
             block_mask=block_mask,
             scale=1.0,
             enable_gqa=True

@@ -200,7 +200,7 @@ class CausalSelfAttention(nn.Module):
             k.transpose(1, 2),
             v.transpose(1, 2),
             block_mask=block_mask,
-            score_mod=lambda score, *args: 0 - (score ** -2),
+            score_mod=lambda score, *args: 0 - torch.log1p(score ** -2),
         )
         y = y.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
         y = self.c_proj(y)

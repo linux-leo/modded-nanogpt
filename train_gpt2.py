@@ -198,7 +198,7 @@ class CausalSelfAttention(nn.Module):
         q = q.transpose(1, 2)  # (B, num_heads, T, head_dim)
         k = k.transpose(1, 2)  # (B, num_heads, T, head_dim)
         v = v.transpose(1, 2)  # (B, num_heads, T, head_dim)
-        y = flex_attention(q, k, v, block_mask=block_mask, score_mod=lambda score, *args: -(score.square().log1p()))
+        y = flex_attention(q, k, v, block_mask=block_mask, score_mod=lambda score, *args: score*score.tanh())
         y = y.transpose(1, 2).contiguous().view_as(x) # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y
